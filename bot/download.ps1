@@ -15,8 +15,22 @@ $ProgressPreference = 'SilentlyContinue'
 $repo = 'Snowoo-2z/AdsCords'
 $branch = 'arena/9e56519f-adscords'
 
-# Ton dossier bot local
-$downloads = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+# Ton dossier bot local. Le registre respecte aussi un dossier Téléchargements déplacé vers OneDrive.
+try {
+    $userShellFolders = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+    $downloads = $userShellFolders.'{374DE290-123F-4565-9164-39C4925E467B}'
+    if ($downloads) {
+        $downloads = [Environment]::ExpandEnvironmentVariables($downloads)
+    }
+}
+catch {
+    $downloads = $null
+}
+
+if (-not $downloads) {
+    $downloads = Join-Path $env:USERPROFILE 'Downloads'
+}
+
 $destination = Join-Path $downloads 'bot'
 $envFile = Join-Path $destination '.env'
 
