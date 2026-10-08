@@ -50,8 +50,9 @@ Dans **Supabase > SQL Editor**, exécutez les migrations dans cet ordre :
 8. `supabase/migrations/008_campaign_delivery_cleanup.sql`
 9. `supabase/migrations/009_unlimited_campaigns.sql`
 10. `supabase/migrations/010_fix_click_rpc_column_ambiguity.sql`
+11. `supabase/migrations/011_adaptive_republication_schedule.sql`
 
-Les migrations `004` à `010` sont obligatoires pour les campagnes à durée limitée ou illimitée, `.mesgains`, les crédits bonus et `.profile`. La migration `010` corrige l'enregistrement des clics : elle est impérative même si `009` a déjà été exécutée.
+Les migrations `004` à `011` sont obligatoires pour les campagnes à durée limitée ou illimitée, `.mesgains`, les crédits bonus et `.profile`. La migration `010` corrige l'enregistrement des clics : elle est impérative même si `009` a déjà été exécutée. La migration `011` active la rotation adaptative à cinq heures.
 
 | Élément | Rôle |
 | --- | --- |
@@ -78,7 +79,7 @@ npx supabase link --project-ref VOTRE_PROJECT_REF
 npx supabase functions deploy visit --no-verify-jwt
 ```
 
-Après l’installation de `004` à `010` et cette mise à jour du bot, redéployez aussi `visit` avec la même commande : elle affiche une page neutre lorsque le budget journalier est atteint, sans révéler de montant au membre.
+Après l’installation de `004` à `011` et cette mise à jour du bot, redéployez aussi `visit` avec la même commande : elle affiche une page neutre lorsque le budget journalier est atteint, sans révéler de montant au membre.
 
 Si le navigateur affiche « Erreur temporaire » après un bouton publicitaire, ouvrez **Supabase > Edge Functions > visit > Logs**, recherchez l’événement `register_ad_click_failed` et relevez son `diagnostic_id`. Les détails SQL restent uniquement dans les logs, jamais dans la page publique.
 
@@ -118,7 +119,7 @@ Le bot répartit automatiquement le budget total sur chaque créneau de **24 heu
 
 Avec `illimité`, il n’y a aucun plafond de 24 heures : la campagne reste diffusée et consomme son budget total jusqu’à l’épuisement, puis ses messages et liens de suivi sont retirés.
 
-Tant que le plafond journalier n’est pas consommé, AdsCords remonte la publicité dans chaque salon configuré toutes les **30 minutes**. Le nouveau message remplace le précédent afin de remettre la campagne en avant sans accumuler les doublons dans le salon. La republication s’arrête automatiquement lorsque le budget du jour est consommé ou que la durée de campagne est terminée. À l’expiration ou à l’épuisement complet, le bot retire les messages restants et invalide les anciennes URLs de suivi. Lorsqu’un nouveau serveur termine `.config`, les campagnes encore diffusables y sont publiées immédiatement : il n’attend pas le prochain intervalle de 30 minutes.
+Tant que le budget disponible le permet, AdsCords remonte chaque campagne dans chaque salon configuré toutes les **5 heures**. La publication initiale reste immédiate. Ensuite, le bot répartit automatiquement les premières remontées sur une fenêtre de cinq heures selon le nombre de campagnes actives : avec `N` campagnes, les remontées sont espacées d’environ `5 h / N` au lieu d’arriver toutes ensemble. Le nouveau message remplace le précédent afin de remettre la campagne en avant sans accumuler les doublons dans le salon. La republication s’arrête automatiquement lorsque le budget du créneau courant est consommé ou que la durée de campagne est terminée. À l’expiration ou à l’épuisement complet, le bot retire les messages restants et invalide les anciennes URLs de suivi. Lorsqu’un nouveau serveur termine `.config`, les campagnes encore diffusables y sont publiées immédiatement : il n’attend pas le prochain créneau.
 
 Après le formulaire, choisissez l’une des quatre options :
 

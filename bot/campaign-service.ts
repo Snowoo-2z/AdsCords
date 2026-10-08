@@ -16,6 +16,7 @@ import type {
   ProfileSummary
 } from './domain.js';
 import { adEmbed, adRow } from './embeds.js';
+import { firstRepublishDelayMs, nextRepublishAt, REPUBLISH_INTERVAL_MS } from './republish-schedule.js';
 
 export interface PublishSummary {
   sent: number;
@@ -54,8 +55,7 @@ interface CampaignMedia {
 }
 
 const DRAFT_LIFETIME_MS = 10 * 60 * 1000;
-const REPUBLISH_INTERVAL_MS = 30 * 60 * 1000;
-// Vérifie fréquemment, mais chaque message reste espacé d'au moins 30 minutes.
+// La vérification reste fréquente afin de respecter les créneaux, sans republier plus d'une fois toutes les 5 h.
 const REPUBLISH_CHECK_INTERVAL_MS = 60 * 1000;
 
 export class CampaignService {
@@ -86,9 +86,17 @@ export class CampaignService {
   }
 
   async publish(ad: AdCampaign, media?: CampaignMedia): Promise<PublishSummary> {
-    const settings = await this.settingsRepository.list();
+    const [settings, activeCampaigns] = await Promise.all([
+      this.settingsRepository.list(),
+      this.adsRepository.refreshableCampaigns()
+    ]);
+    const rotationCampaigns = activeCampaigns.some((campaign) => campaign.id === ad.id) ? activeCampaigns : [...activeCampaigns, ad];
+    const firstDelayMs = firstRepublishDelayMs(ad, rotationCampaigns);
+
     await Promise.allSettled(settings.map((setting) => this.syncGuildOwner(setting.guildId, setting.ownerDiscordId)));
-    const results = await Promise.allSettled(settings.map((setting) => this.publishToGuild(ad, setting.guildId, setting.adChannelId, media)));
+    const results = await Promise.allSettled(
+      settings.map((setting) => this.publishToGuild(ad, setting.guildId, setting.adChannelId, media, firstDelayMs))
+    );
     return {
       sent: results.filter((result) => result.status === 'fulfilled').length,
       failed: results.filter((result) => result.status === 'rejected').length
@@ -97,7 +105,7 @@ export class CampaignService {
 
   startRepublishing(): void {
     if (this.republishTimer) return;
-    // Au redémarrage, seules les publications âgées d'au moins 30 minutes seront remontées.
+    // Au redémarrage, les créneaux stockés en base empêchent toute republication prématurée.
     void this.refreshActiveCampaigns().catch((error: unknown) => {
       console.error('[AdsCords] Première republication des campagnes impossible', error);
     });
@@ -121,15 +129,14 @@ export class CampaignService {
       ]);
       const deliveryByCampaignAndGuild = new Map(deliveries.map((delivery) => [`${delivery.adId}:${delivery.guildId}`, delivery]));
       const now = Date.now();
-      // Une campagne vient d'être publiée directement à sa création ; on évite toute course avec cette première diffusion.
-      const campaignsReadyToRefresh = campaigns.filter((campaign) => now - new Date(campaign.createdAt).getTime() >= REPUBLISH_INTERVAL_MS);
       const tasks: Array<Promise<void>> = [];
 
-      for (const campaign of campaignsReadyToRefresh) {
+      for (const campaign of campaigns) {
         for (const setting of settings) {
           const previous = deliveryByCampaignAndGuild.get(`${campaign.id}:${setting.guildId}`);
-          if (previous && now - new Date(previous.deliveredAt).getTime() < REPUBLISH_INTERVAL_MS) continue;
-          tasks.push(this.republishToGuild(campaign, setting.guildId, setting.adChannelId, previous));
+          // Sans diffusion, par exemple après un incident Discord, la campagne est rétablie immédiatement.
+          if (previous && now < new Date(previous.nextRepublishAt).getTime()) continue;
+          tasks.push(this.republishToGuild(campaign, setting.guildId, setting.adChannelId, previous, undefined, REPUBLISH_INTERVAL_MS));
         }
       }
 
@@ -178,7 +185,8 @@ export class CampaignService {
       const previous = deliveries.find((delivery) => delivery.adId === campaign.id && delivery.guildId === guildId);
       // Pour un serveur ajouté après la création, on recopie le visuel d'une publication existante.
       const mediaSource = previous ?? deliveries.find((delivery) => delivery.adId === campaign.id);
-      return this.republishToGuild(campaign, guildId, setting.adChannelId, previous, mediaSource);
+      const nextDelayMs = previous ? REPUBLISH_INTERVAL_MS : firstRepublishDelayMs(campaign, campaigns);
+      return this.republishToGuild(campaign, guildId, setting.adChannelId, previous, mediaSource, nextDelayMs);
     });
     const results = await Promise.allSettled(tasks);
     return {
@@ -353,7 +361,8 @@ export class CampaignService {
     guildId: string,
     channelId: string,
     previous?: AdDelivery,
-    mediaSource?: AdDelivery
+    mediaSource?: AdDelivery,
+    nextDelayMs = REPUBLISH_INTERVAL_MS
   ): Promise<void> {
     let previousMessage: Message | null = null;
     let media: CampaignMedia | undefined;
@@ -374,7 +383,7 @@ export class CampaignService {
       }
     }
 
-    await this.publishToGuild(ad, guildId, channelId, media);
+    await this.publishToGuild(ad, guildId, channelId, media, nextDelayMs);
     if (previousMessage?.deletable) await previousMessage.delete().catch(() => undefined);
   }
 
@@ -392,7 +401,13 @@ export class CampaignService {
     };
   }
 
-  private async publishToGuild(ad: AdCampaign, guildId: string, channelId: string, media?: CampaignMedia): Promise<void> {
+  private async publishToGuild(
+    ad: AdCampaign,
+    guildId: string,
+    channelId: string,
+    media?: CampaignMedia,
+    nextDelayMs = REPUBLISH_INTERVAL_MS
+  ): Promise<void> {
     const guild = await this.getGuild(guildId);
     if (!guild) throw new Error(`Serveur introuvable : ${guildId}`);
 
@@ -426,11 +441,16 @@ export class CampaignService {
         : await textChannel.send({ content: ad.description, components, allowedMentions: { parse: [] } });
     }
 
+    const deliveredAtMs = Date.now();
+    const nextRepublishAtMs = nextDelayMs === REPUBLISH_INTERVAL_MS
+      ? nextRepublishAt(deliveredAtMs)
+      : deliveredAtMs + nextDelayMs;
     await this.adsRepository.saveDelivery({
       adId: ad.id,
       guildId,
       channelId: channel.id,
-      messageId: message.id
+      messageId: message.id,
+      nextRepublishAt: new Date(nextRepublishAtMs).toISOString()
     });
   }
 

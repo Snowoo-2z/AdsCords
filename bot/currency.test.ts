@@ -6,6 +6,7 @@ import { campaignPeriodAt } from './campaign-period.js';
 import { isDiscordServerLink } from './embeds.js';
 import { createMapubDashboardPng } from './mapub-image.js';
 import { createEarningsDashboardPng, createOwnerDashboardPng, createProfileDashboardPng } from './account-image.js';
+import { firstRepublishDelayMs, nextRepublishAt, REPUBLISH_INTERVAL_MS } from './republish-schedule.js';
 
 test('euroToCents accepte les formats français et internationaux', () => {
   assert.equal(euroToCents('10'), 1000);
@@ -40,6 +41,22 @@ test('campaignPeriodAt garde des journées complètes de 24 h et répartit exact
   assert.equal(afterEnd, null);
 });
 
+
+test('la rotation espace automatiquement les premières remontées puis garde cinq heures par campagne', () => {
+  const campaigns = [
+    { id: 'campaign-a', createdAt: '2026-10-08T10:00:00.000Z' },
+    { id: 'campaign-b', createdAt: '2026-10-08T10:01:00.000Z' },
+    { id: 'campaign-c', createdAt: '2026-10-08T10:02:00.000Z' }
+  ];
+  const firstDelayA = firstRepublishDelayMs(campaigns[0]!, campaigns);
+  const firstDelayB = firstRepublishDelayMs(campaigns[1]!, campaigns);
+  const firstDelayC = firstRepublishDelayMs(campaigns[2]!, campaigns);
+
+  assert.equal(firstDelayA, REPUBLISH_INTERVAL_MS);
+  assert.equal(firstDelayB, REPUBLISH_INTERVAL_MS + REPUBLISH_INTERVAL_MS / 3);
+  assert.equal(firstDelayC, REPUBLISH_INTERVAL_MS + (2 * REPUBLISH_INTERVAL_MS) / 3);
+  assert.equal(nextRepublishAt(Date.parse('2026-10-08T10:00:00.000Z')), Date.parse('2026-10-08T15:00:00.000Z'));
+});
 
 test('isDiscordServerLink distingue les invitations Discord des sites web', () => {
   assert.equal(isDiscordServerLink('https://discord.gg/adscords'), true);

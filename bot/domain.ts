@@ -34,6 +34,8 @@ export interface AdDelivery {
   channelId: string;
   messageId: string;
   deliveredAt: string;
+  /** Date persistée de la prochaine remontée afin que les redémarrages ne cassent pas la rotation. */
+  nextRepublishAt: string;
 }
 
 export type ClickResultStatus = 'charged' | 'already_clicked' | 'unavailable' | 'not_found';

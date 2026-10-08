@@ -38,13 +38,18 @@ function toCampaign(row: Record<string, unknown>): AdCampaign {
 }
 
 function toDelivery(row: Record<string, unknown>): AdDelivery {
+  const deliveredAt = String(row.delivered_at);
   return {
     id: String(row.id),
     adId: String(row.ad_id),
     guildId: String(row.guild_id),
     channelId: String(row.channel_id),
     messageId: String(row.message_id),
-    deliveredAt: String(row.delivered_at)
+    deliveredAt,
+    // Fallback défensif pendant le déploiement de la migration 011 : jamais une remontée immédiate.
+    nextRepublishAt: row.next_republish_at
+      ? String(row.next_republish_at)
+      : new Date(new Date(deliveredAt).getTime() + 5 * 60 * 60 * 1000).toISOString()
   };
 }
 
@@ -115,7 +120,8 @@ export class AdsRepository {
         guild_id: input.guildId,
         channel_id: input.channelId,
         message_id: input.messageId,
-        delivered_at: new Date().toISOString()
+        delivered_at: new Date().toISOString(),
+        next_republish_at: input.nextRepublishAt
       },
       { onConflict: 'ad_id,guild_id' }
     );
