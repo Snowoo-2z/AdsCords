@@ -1,65 +1,95 @@
 <#
 .SYNOPSIS
-Télécharge uniquement le dossier bot du dépôt public AdsCords.
+Met à jour le dossier bot dans Téléchargements sans remplacer son fichier .env.
 
 .DESCRIPTION
-Le script récupère l'archive publique GitHub, extrait uniquement le répertoire bot
-vers le dossier indiqué puis supprime ses fichiers temporaires. Git n'est pas requis.
+Télécharge la branche AdsCords de cette session, remplace le contenu du dossier
+Téléchargements\bot, restaure le .env local puis réinstalle exactement les dépendances.
 #>
-
-[CmdletBinding()]
-param(
-    [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
-    [string]$Repository = 'Snowoo-2z/AdsCords',
-
-    [ValidateNotNullOrEmpty()]
-    [string]$Branch = 'main',
-
-    [ValidateNotNullOrEmpty()]
-    [string]$Destination = (Join-Path -Path (Get-Location) -ChildPath 'bot')
-)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-if (Test-Path -LiteralPath $Destination) {
-    throw "Le dossier de destination existe déjà : $Destination`nChoisissez -Destination avec un nouveau chemin pour éviter d'écraser des fichiers."
+# Branche AdsCords à récupérer
+$repo = 'Snowoo-2z/AdsCords'
+$branch = 'arena/9e56519f-adscords'
+
+# Ton dossier bot local
+$downloads = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+$destination = Join-Path $downloads 'bot'
+$envFile = Join-Path $destination '.env'
+
+if (-not (Test-Path -LiteralPath $destination)) {
+    throw "Dossier introuvable : $destination"
 }
 
-$temporaryDirectory = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ("adscords-" + [System.Guid]::NewGuid().ToString('N'))
-$archivePath = Join-Path -Path $temporaryDirectory -ChildPath 'adscords.zip'
-$encodedBranch = [System.Uri]::EscapeDataString($Branch)
-$archiveUrl = "https://github.com/$Repository/archive/refs/heads/$encodedBranch.zip"
+# Sauvegarde temporaire du .env modifié
+$temp = Join-Path $env:TEMP ("AdsCords-update-" + [guid]::NewGuid())
+$zip = Join-Path $temp 'adscords.zip'
+$envBackup = Join-Path $temp '.env'
 
 try {
-    New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path $temp | Out-Null
 
-    Write-Host "Téléchargement de $Repository ($Branch)…"
-    Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+    if (Test-Path -LiteralPath $envFile) {
+        Copy-Item -LiteralPath $envFile -Destination $envBackup -Force
+        Write-Host '.env sauvegardé.' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Attention : aucun fichier .env trouvé dans $destination" -ForegroundColor Yellow
+    }
 
-    Write-Host 'Extraction du dossier bot…'
-    Expand-Archive -LiteralPath $archivePath -DestinationPath $temporaryDirectory -Force
+    # Télécharge la branche GitHub définie ci-dessus.
+    Invoke-WebRequest `
+        -Uri "https://github.com/$repo/archive/refs/heads/$branch.zip" `
+        -OutFile $zip
 
-    $archiveRoot = Get-ChildItem -LiteralPath $temporaryDirectory -Directory |
-        Where-Object { Test-Path -LiteralPath (Join-Path -Path $_.FullName -ChildPath 'bot') } |
+    Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
+
+    $archiveRoot = Get-ChildItem -LiteralPath $temp -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bot') } |
         Select-Object -First 1
 
     if ($null -eq $archiveRoot) {
-        throw "Le dossier bot est introuvable dans l'archive de la branche '$Branch'."
+        throw "Le dossier bot est introuvable dans l'archive téléchargée."
     }
 
-    $destinationParent = Split-Path -Path $Destination -Parent
-    if ($destinationParent) {
-        New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+    $sourceBot = Join-Path $archiveRoot.FullName 'bot'
+
+    # Supprime tout dans bot SAUF .env.
+    Get-ChildItem -LiteralPath $destination -Force |
+        Where-Object { $_.Name -ne '.env' } |
+        Remove-Item -Recurse -Force
+
+    # Copie la nouvelle version du bot.
+    Get-ChildItem -LiteralPath $sourceBot -Force |
+        ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
+        }
+
+    # Restaure le .env même si besoin.
+    if (Test-Path -LiteralPath $envBackup) {
+        Copy-Item -LiteralPath $envBackup -Destination $envFile -Force
     }
 
-    Copy-Item -LiteralPath (Join-Path -Path $archiveRoot.FullName -ChildPath 'bot') -Destination $Destination -Recurse -Force
-    Write-Host "Terminé : $Destination" -ForegroundColor Green
-    Write-Host "Ensuite : cd `"$Destination`" ; Copy-Item .env.example .env ; npm ci ; npm start"
+    # Réinstalle les dépendances Node exactement comme dans package-lock.json.
+    Push-Location $destination
+    try {
+        npm ci
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm ci a échoué avec le code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    Write-Host "Bot mis à jour avec succès : $destination" -ForegroundColor Green
+    Write-Host 'Ton fichier .env a été conservé.' -ForegroundColor Green
 }
 finally {
-    if (Test-Path -LiteralPath $temporaryDirectory) {
-        Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force
+    if (Test-Path -LiteralPath $temp) {
+        Remove-Item -LiteralPath $temp -Recurse -Force
     }
 }
