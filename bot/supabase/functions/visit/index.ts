@@ -117,7 +117,7 @@ Deno.serve(async (request) => {
     return new Response(null, { status: 302, headers });
   }
 
-  const { data, error } = await supabase.rpc('register_ad_click', {
+  const { data, error } = await supabase.rpc('register_secure_ad_click', {
     p_ad_id: adId,
     // Un lien Discord ne fournit pas l'identité Discord. Le cookie signé déduplique le même navigateur.
     p_user_id: `web:${visitorId}`,

@@ -19,10 +19,9 @@ alter table public.ad_deliveries
 create unique index if not exists ad_deliveries_delivery_token_key
   on public.ad_deliveries (delivery_token);
 
--- La signature précédente, sans jeton, ne doit plus rester appelable.
-drop function if exists public.register_ad_click(uuid, text, text);
-
-create or replace function public.register_ad_click(
+-- Une RPC distincte évite toute surcharge PostgREST et permet une transition sans panne
+-- depuis les anciens liens pendant que le bot les remplace par des liens tokenisés.
+create or replace function public.register_secure_ad_click(
   p_ad_id uuid,
   p_user_id text,
   p_guild_id text,
@@ -247,8 +246,8 @@ begin
 end;
 $$;
 
-revoke all on function public.register_ad_click(uuid, text, text, uuid) from public, anon, authenticated;
-grant execute on function public.register_ad_click(uuid, text, text, uuid) to service_role;
+revoke all on function public.register_secure_ad_click(uuid, text, text, uuid) from public, anon, authenticated;
+grant execute on function public.register_secure_ad_click(uuid, text, text, uuid) to service_role;
 
 -- Le cache de schéma doit voir immédiatement la nouvelle signature RPC.
 notify pgrst, 'reload schema';
