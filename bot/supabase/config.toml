@@ -1,0 +1,2 @@
+[functions.visit]
+verify_jwt = false
