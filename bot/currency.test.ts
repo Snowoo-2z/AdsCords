@@ -90,7 +90,8 @@ test('createMapubDashboardPng accepte une campagne sans durée', () => {
     isActive: true,
     createdAt: now,
     updatedAt: now,
-    uniqueClicks: 0
+    uniqueClicks: 0,
+    deliveryCount: 1
   }]);
   assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
 });

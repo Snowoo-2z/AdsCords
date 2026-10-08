@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Client, Guild, type GuildTextBasedChannel, type Message } from 'discord.js';
 
 import { env } from './environment.js';
@@ -10,7 +12,6 @@ import type {
   AdDelivery,
   CampaignRewardType,
   ClickGuardSettings,
-  ClickResult,
   EarningsSummary,
   OwnerEarningsSummary,
   ProfileSummary
@@ -55,8 +56,18 @@ interface CampaignMedia {
 }
 
 const DRAFT_LIFETIME_MS = 10 * 60 * 1000;
+export const MAX_CAMPAIGN_MEDIA_BYTES = 8 * 1024 * 1024;
 // La vérification reste fréquente afin de respecter les créneaux, sans republier plus d'une fois toutes les 5 h.
 const REPUBLISH_CHECK_INTERVAL_MS = 60 * 1000;
+
+function isSupportedCampaignMedia(content: Buffer): boolean {
+  const png = content.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const jpeg = content.length >= 3 && content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff;
+  const gif = content.subarray(0, 6).toString('ascii') === 'GIF87a' || content.subarray(0, 6).toString('ascii') === 'GIF89a';
+  const webp = content.subarray(0, 4).toString('ascii') === 'RIFF' && content.subarray(8, 12).toString('ascii') === 'WEBP';
+  const avif = content.subarray(4, 8).toString('ascii') === 'ftyp' && content.subarray(8, 24).toString('ascii').includes('avif');
+  return png || jpeg || gif || webp || avif;
+}
 
 export class CampaignService {
   public constructor(
@@ -122,20 +133,31 @@ export class CampaignService {
     this.isRefreshingCampaigns = true;
     try {
       await this.cleanExpiredCampaigns();
-      const [campaigns, settings, deliveries] = await Promise.all([
+      const [refreshableCampaigns, activeCampaigns, settings, deliveries] = await Promise.all([
         this.adsRepository.refreshableCampaigns(),
+        this.adsRepository.activeCampaigns(),
         this.settingsRepository.list(),
         this.adsRepository.listAllDeliveries()
       ]);
       const deliveryByCampaignAndGuild = new Map(deliveries.map((delivery) => [`${delivery.adId}:${delivery.guildId}`, delivery]));
+      const campaignById = new Map<string, AdCampaign>(refreshableCampaigns.map((campaign) => [campaign.id, campaign]));
+      // Après la migration des liens sécurisés, une seule remontée immédiate remplace les messages
+      // historiques par des messages avec jeton. Elle est faite même si le budget du créneau est plein.
+      for (const campaign of activeCampaigns) {
+        if (deliveries.some((delivery) => delivery.adId === campaign.id && delivery.trackingVersion < 1)) {
+          campaignById.set(campaign.id, campaign);
+        }
+      }
+      const campaigns = [...campaignById.values()];
       const now = Date.now();
       const tasks: Array<Promise<void>> = [];
 
       for (const campaign of campaigns) {
         for (const setting of settings) {
           const previous = deliveryByCampaignAndGuild.get(`${campaign.id}:${setting.guildId}`);
-          // Sans diffusion, par exemple après un incident Discord, la campagne est rétablie immédiatement.
-          if (previous && now < new Date(previous.nextRepublishAt).getTime()) continue;
+          // Sans diffusion, après un incident Discord ou pour remplacer une ancienne URL non tokenisée,
+          // la campagne est rétablie immédiatement.
+          if (previous && previous.trackingVersion >= 1 && now < new Date(previous.nextRepublishAt).getTime()) continue;
           tasks.push(this.republishToGuild(campaign, setting.guildId, setting.adChannelId, previous, undefined, REPUBLISH_INTERVAL_MS));
         }
       }
@@ -240,8 +262,16 @@ export class CampaignService {
     // La pièce jointe est copiée par le bot dans chaque publication avant que le message source soit supprimé.
     const response = await fetch(mediaUrl);
     if (!response.ok) throw new Error(`Impossible de télécharger le visuel Discord (${response.status}).`);
+    const declaredLength = Number(response.headers.get('content-length') ?? 0);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_CAMPAIGN_MEDIA_BYTES) {
+      throw new Error('Le visuel dépasse la limite de 8 Mo.');
+    }
     const content = Buffer.from(await response.arrayBuffer());
     if (content.length === 0) throw new Error('Le visuel Discord est vide.');
+    if (content.length > MAX_CAMPAIGN_MEDIA_BYTES) throw new Error('Le visuel dépasse la limite de 8 Mo.');
+    if (!isSupportedCampaignMedia(content)) {
+      throw new Error('Le fichier doit être une image PNG, JPEG, GIF, WebP ou AVIF valide.');
+    }
 
     const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/gu, '_') || 'media';
     return this.publishDraft(ownerDiscordId, { url: mediaUrl, filename: safeFilename, content });
@@ -338,17 +368,6 @@ export class CampaignService {
     };
   }
 
-  async registerClick(adId: string, userId: string, guildId: string): Promise<ClickResult> {
-    const result = await this.adsRepository.registerClick(adId, userId, guildId);
-    if (result.status === 'charged' && result.isActive === false) {
-      // Plus aucun clic valorisable sur la campagne : les CTA déjà publiés deviennent inactifs.
-      void this.disablePublishedButtons(adId).catch((error: unknown) => {
-        console.error('[AdsCords] Impossible de désactiver les boutons expirés', error);
-      });
-    }
-    return result;
-  }
-
   private async syncGuildOwner(guildId: string, savedOwnerId: string | null): Promise<void> {
     const guild = await this.getGuild(guildId);
     if (guild && guild.ownerId !== savedOwnerId) {
@@ -389,11 +408,13 @@ export class CampaignService {
 
   private async mediaFromMessage(message: Message): Promise<CampaignMedia | undefined> {
     const attachment = message.attachments.first();
-    if (!attachment) return undefined;
+    if (!attachment || attachment.size > MAX_CAMPAIGN_MEDIA_BYTES) return undefined;
     const response = await fetch(attachment.url);
     if (!response.ok) return undefined;
+    const declaredLength = Number(response.headers.get('content-length') ?? 0);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_CAMPAIGN_MEDIA_BYTES) return undefined;
     const content = Buffer.from(await response.arrayBuffer());
-    if (content.length === 0) return undefined;
+    if (content.length === 0 || content.length > MAX_CAMPAIGN_MEDIA_BYTES || !isSupportedCampaignMedia(content)) return undefined;
     return {
       url: attachment.url,
       filename: (attachment.name ?? 'media').replace(/[^a-zA-Z0-9._-]/gu, '_') || 'media',
@@ -416,7 +437,9 @@ export class CampaignService {
       throw new Error(`Salon de diffusion invalide : ${channelId}`);
     }
 
-    const trackingUrl = this.trackingUrl(ad.id, guildId);
+    // Un jeton neuf lie le lien à ce message précis. Une republication invalide les anciens liens.
+    const deliveryToken = randomUUID();
+    const trackingUrl = this.trackingUrl(ad.id, guildId, deliveryToken);
     const components = [adRow(trackingUrl, ad.destinationUrl)];
     const textChannel = channel as GuildTextBasedChannel;
     const displayAd = media ? { ...ad, mediaUrl: `attachment://${media.filename}` } : ad;
@@ -450,28 +473,16 @@ export class CampaignService {
       guildId,
       channelId: channel.id,
       messageId: message.id,
+      deliveryToken,
       nextRepublishAt: new Date(nextRepublishAtMs).toISOString()
     });
   }
 
-  private async disablePublishedButtons(adId: string): Promise<void> {
-    const deliveries = await this.adsRepository.listDeliveries(adId);
-    await Promise.allSettled(
-      deliveries.map(async (delivery) => {
-        const guild = await this.getGuild(delivery.guildId);
-        if (!guild) return;
-        const channel = await guild.channels.fetch(delivery.channelId);
-        if (!channel?.isTextBased() || channel.isDMBased()) return;
-        const message = await (channel as GuildTextBasedChannel).messages.fetch(delivery.messageId);
-        await message.edit({ components: [adRow(this.trackingUrl(adId, delivery.guildId), '', true)] });
-      })
-    );
-  }
-
-  private trackingUrl(adId: string, guildId: string): string {
+  private trackingUrl(adId: string, guildId: string, deliveryToken: string): string {
     const url = new URL(env.trackingBaseUrl);
     url.searchParams.set('ad', adId);
     url.searchParams.set('guild', guildId);
+    url.searchParams.set('t', deliveryToken);
     return url.toString();
   }
 

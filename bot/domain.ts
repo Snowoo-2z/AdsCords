@@ -33,24 +33,20 @@ export interface AdDelivery {
   guildId: string;
   channelId: string;
   messageId: string;
+  /** Jeton aléatoire de l'unique message Discord qui porte ce lien de suivi. */
+  deliveryToken: string;
+  /** 0 = message pré-migration, 1 = lien signé par jeton. */
+  trackingVersion: number;
   deliveredAt: string;
   /** Date persistée de la prochaine remontée afin que les redémarrages ne cassent pas la rotation. */
   nextRepublishAt: string;
 }
 
-export type ClickResultStatus = 'charged' | 'already_clicked' | 'unavailable' | 'not_found';
-
-export interface ClickResult {
-  status: ClickResultStatus;
-  destinationUrl: string | null;
-  chargedCents: number;
-  creditsRemainingCents: number | null;
-  isActive: boolean | null;
-  pricingReason: string | null;
-}
-
 export interface CampaignDashboardItem extends AdCampaign {
+  /** Clics dédupliqués par navigateur pseudonymisé, et non des vues Discord. */
   uniqueClicks: number;
+  /** Nombre actuel de serveurs dans lesquels la campagne est effectivement diffusée. */
+  deliveryCount: number;
 }
 
 export interface RefreshableCampaign extends AdCampaign {

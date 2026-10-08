@@ -64,7 +64,7 @@ function campaignCard(campaign: CampaignDashboardItem, index: number): string {
       <circle cx="950" cy="${top + 45}" r="6" fill="${accent}"/>
       <text x="970" y="${top + 51}" class="badge" fill="${badgeText}">${status}</text>
 
-      <text x="86" y="${top + 120}" class="statLabel">CLICS</text>
+      <text x="86" y="${top + 120}" class="statLabel">CLICS UNIQUES</text>
       <text x="86" y="${top + 157}" class="statValue">${campaign.uniqueClicks}</text>
       <line x1="220" y1="${top + 107}" x2="220" y2="${top + 165}" stroke="#E6E8F2" stroke-width="2"/>
 
@@ -78,6 +78,7 @@ function campaignCard(campaign: CampaignDashboardItem, index: number): string {
       <rect x="842" y="${top + 123}" width="248" height="14" rx="7" fill="#E8EAF4"/>
       <rect x="842" y="${top + 123}" width="${progressWidth}" height="14" rx="7" fill="${accent}"/>
       <text x="842" y="${top + 167}" class="progressText">${escapeXml(pacingLabel)}</text>
+      <text x="86" y="${top + 187}" class="statSub">Diffusion active : ${campaign.deliveryCount} serveur${campaign.deliveryCount > 1 ? 's' : ''}</text>
     </g>`;
 }
 
@@ -140,7 +141,7 @@ export function createMapubDashboardPng(campaigns: CampaignDashboardItem[], titl
 
     ${noCampaign}
     ${displayed.length > 0 ? cards : ''}
-    <text x="56" y="${height - 20}" class="footer">AdsCords • Statistiques actualisées à l’ouverture</text>
+    <text x="56" y="${height - 20}" class="footer">AdsCords • Clics uniques pseudonymisés, pas de comptage des vues Discord</text>
   </svg>`;
 
   const renderer = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });

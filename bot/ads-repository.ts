@@ -7,7 +7,6 @@ import type {
   CampaignRewardType,
   ClickGuardSettings,
   ClickLogEntry,
-  ClickResult,
   RefreshableCampaign
 } from './domain.js';
 
@@ -45,6 +44,8 @@ function toDelivery(row: Record<string, unknown>): AdDelivery {
     guildId: String(row.guild_id),
     channelId: String(row.channel_id),
     messageId: String(row.message_id),
+    deliveryToken: String(row.delivery_token ?? ''),
+    trackingVersion: Number(row.tracking_version ?? 0),
     deliveredAt,
     // Fallback défensif pendant le déploiement de la migration 011 : jamais une remontée immédiate.
     nextRepublishAt: row.next_republish_at
@@ -113,13 +114,15 @@ export class AdsRepository {
     return toCampaign(data as Record<string, unknown>);
   }
 
-  async saveDelivery(input: Omit<AdDelivery, 'id' | 'deliveredAt'>): Promise<void> {
+  async saveDelivery(input: Omit<AdDelivery, 'id' | 'deliveredAt' | 'trackingVersion'>): Promise<void> {
     const { error } = await supabase.from('ad_deliveries').upsert(
       {
         ad_id: input.adId,
         guild_id: input.guildId,
         channel_id: input.channelId,
         message_id: input.messageId,
+        delivery_token: input.deliveryToken,
+        tracking_version: 1,
         delivered_at: new Date().toISOString(),
         next_republish_at: input.nextRepublishAt
       },
@@ -145,41 +148,6 @@ export class AdsRepository {
     const { data, error } = await supabase.from('ads').delete().not('id', 'is', null).select('id');
     if (error) throw new Error(`Impossible de supprimer les campagnes : ${error.message}`);
     return data?.length ?? 0;
-  }
-
-  async listDeliveries(adId: string): Promise<AdDelivery[]> {
-    const { data, error } = await supabase.from('ad_deliveries').select().eq('ad_id', adId);
-    if (error) throw new Error(`Impossible de charger les diffusions : ${error.message}`);
-    return (data ?? []).map((row) => toDelivery(row as Record<string, unknown>));
-  }
-
-  async registerClick(adId: string, userId: string, guildId: string): Promise<ClickResult> {
-    const { data, error } = await supabase.rpc('register_ad_click', {
-      p_ad_id: adId,
-      p_user_id: userId,
-      p_guild_id: guildId
-    });
-    if (error) throw new Error(`Impossible d'enregistrer le clic : ${error.message}`);
-
-    const row = Array.isArray(data) ? data[0] : data;
-    if (!row) throw new Error('La base n’a retourné aucun résultat de clic.');
-    const result = row as Record<string, unknown>;
-    const status = String(result.status);
-    if (!['charged', 'already_clicked', 'unavailable', 'not_found'].includes(status)) {
-      throw new Error('La base a retourné un statut de clic invalide.');
-    }
-
-    return {
-      status: status as ClickResult['status'],
-      destinationUrl: result.destination_url ? String(result.destination_url) : null,
-      chargedCents: Number(result.charged_cents ?? 0),
-      creditsRemainingCents:
-        result.credits_remaining_cents === null || result.credits_remaining_cents === undefined
-          ? null
-          : Number(result.credits_remaining_cents),
-      isActive: result.is_active === null || result.is_active === undefined ? null : Boolean(result.is_active),
-      pricingReason: result.pricing_reason ? String(result.pricing_reason) : null
-    };
   }
 
   async clickGuardSettings(): Promise<ClickGuardSettings> {
@@ -256,38 +224,50 @@ export class AdsRepository {
     const campaigns = (ads ?? []).map((row) => toCampaign(row as Record<string, unknown>));
     if (campaigns.length === 0) return [];
 
-    const { data: clicks, error: clicksError } = await supabase
-      .from('ad_clicks')
-      .select('ad_id')
-      .in(
-        'ad_id',
-        campaigns.map((campaign) => campaign.id)
-      );
+    const campaignIds = campaigns.map((campaign) => campaign.id);
+    const [{ data: clicks, error: clicksError }, { data: deliveries, error: deliveriesError }] = await Promise.all([
+      supabase.from('ad_clicks').select('ad_id').in('ad_id', campaignIds),
+      supabase.from('ad_deliveries').select('ad_id').in('ad_id', campaignIds)
+    ]);
     if (clicksError) throw new Error(`Impossible de compter les clics : ${clicksError.message}`);
+    if (deliveriesError) throw new Error(`Impossible de compter les diffusions : ${deliveriesError.message}`);
 
-    const countByAd = new Map<string, number>();
+    const clickCountByAd = new Map<string, number>();
     for (const click of clicks ?? []) {
       const adId = String((click as Record<string, unknown>).ad_id);
-      countByAd.set(adId, (countByAd.get(adId) ?? 0) + 1);
+      clickCountByAd.set(adId, (clickCountByAd.get(adId) ?? 0) + 1);
+    }
+    const deliveryCountByAd = new Map<string, number>();
+    for (const delivery of deliveries ?? []) {
+      const adId = String((delivery as Record<string, unknown>).ad_id);
+      deliveryCountByAd.set(adId, (deliveryCountByAd.get(adId) ?? 0) + 1);
     }
 
     const now = Date.now();
     return campaigns.map((campaign) => ({
       ...campaign,
       isActive: campaign.isActive && (!campaign.endsAt || new Date(campaign.endsAt).getTime() > now),
-      uniqueClicks: countByAd.get(campaign.id) ?? 0
+      uniqueClicks: clickCountByAd.get(campaign.id) ?? 0,
+      deliveryCount: deliveryCountByAd.get(campaign.id) ?? 0
     }));
+  }
+
+  /** Campagnes dans leur fenêtre de diffusion, indépendamment du budget courant. */
+  async activeCampaigns(): Promise<AdCampaign[]> {
+    const { data, error } = await supabase.from('ads').select().eq('is_active', true);
+    if (error) throw new Error(`Impossible de charger les campagnes actives : ${error.message}`);
+
+    const now = new Date();
+    return (data ?? [])
+      .map((row) => toCampaign(row as Record<string, unknown>))
+      .filter((campaign) => new Date(campaign.startsAt).getTime() <= now.getTime() && (!campaign.endsAt || new Date(campaign.endsAt).getTime() > now.getTime()));
   }
 
   /** Campagnes encore actives dont le plafond du créneau courant de 24 h n'est pas consommé. */
   async refreshableCampaigns(): Promise<RefreshableCampaign[]> {
-    const { data, error } = await supabase.from('ads').select().eq('is_active', true);
-    if (error) throw new Error(`Impossible de charger les campagnes à republier : ${error.message}`);
-
+    const activeCampaigns = await this.activeCampaigns();
     const now = new Date();
-    const eligible = (data ?? [])
-      .map((row) => toCampaign(row as Record<string, unknown>))
-      .filter((campaign) => new Date(campaign.startsAt).getTime() <= now.getTime() && (!campaign.endsAt || new Date(campaign.endsAt).getTime() > now.getTime()));
+    const eligible = activeCampaigns;
     if (eligible.length === 0) return [];
 
     const [{ data: clicks, error: clicksError }, { data: settings, error: settingsError }] = await Promise.all([
@@ -381,7 +361,12 @@ export class AdsRepository {
       const adId = String((click as Record<string, unknown>).ad_id);
       countByAd.set(adId, (countByAd.get(adId) ?? 0) + 1);
     }
-    return campaigns.map((campaign) => ({ ...campaign, uniqueClicks: countByAd.get(campaign.id) ?? 0 }));
+    return campaigns.map((campaign) => ({
+      ...campaign,
+      uniqueClicks: countByAd.get(campaign.id) ?? 0,
+      // Le profil n'affiche pas les campagnes en cours ; ce compteur est uniquement requis par le type de dashboard.
+      deliveryCount: 0
+    }));
   }
 
   private toClickGuardSettings(row: Record<string, unknown>): ClickGuardSettings {

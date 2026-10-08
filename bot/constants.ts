@@ -11,7 +11,6 @@ export const COMPONENT_PREFIX = {
   configSelect: 'cfg:select:',
   adPanel: 'pub:open:',
   adModal: 'pub:modal',
-  adVisit: 'ad:visit:',
   adSkipMedia: 'pub:skip-media:',
   adOptions: 'pub:options:',
   clickGuardOpen: 'guard:open:',

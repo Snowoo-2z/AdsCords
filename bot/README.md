@@ -51,13 +51,14 @@ Dans **Supabase > SQL Editor**, exécutez les migrations dans cet ordre :
 9. `supabase/migrations/009_unlimited_campaigns.sql`
 10. `supabase/migrations/010_fix_click_rpc_column_ambiguity.sql`
 11. `supabase/migrations/011_adaptive_republication_schedule.sql`
+12. `supabase/migrations/012_secure_delivery_tokens.sql`
 
-Les migrations `004` à `011` sont obligatoires pour les campagnes à durée limitée ou illimitée, `.mesgains`, les crédits bonus et `.profile`. La migration `010` corrige l'enregistrement des clics : elle est impérative même si `009` a déjà été exécutée. La migration `011` active la rotation adaptative à cinq heures.
+Les migrations `004` à `012` sont obligatoires pour les campagnes à durée limitée ou illimitée, `.mesgains`, les crédits bonus et `.profile`. La migration `010` corrige l'enregistrement des clics : elle est impérative même si `009` a déjà été exécutée. La migration `011` active la rotation adaptative à cinq heures. La migration `012` lie chaque URL au message Discord actuellement diffusé.
 
 | Élément | Rôle |
 | --- | --- |
 | `ads` | Campagnes, budget, type euros/bonus, date de début/fin et durée |
-| `ad_deliveries` | Messages de diffusion et liens de suivi valides |
+| `ad_deliveries` | Messages de diffusion, créneaux de rotation et jetons uniques des liens de suivi |
 | `ad_clicks` | Clics, montant débité et motif de tarification |
 | `guild_settings` | Salon configuré et propriétaire Discord du serveur bénéficiaire |
 | `click_guard_settings` / `click_profiles` | Règles de valeur et protection anti-abus pseudonymisée |
@@ -68,22 +69,25 @@ Les gains sont conservés au **milli-cent en base** pour respecter exactement 30
 
 ### Edge Function de redirection
 
-Le bouton publicitaire ouvre directement l’Edge Function `visit`, qui valide la diffusion, enregistre le clic via `register_ad_click`, puis répond en HTTP `302` vers le lien publicitaire.
+Le bouton publicitaire ouvre directement l’Edge Function `visit`. Elle vérifie que l’URL appartient au **message Discord actuellement diffusé**, initialise au besoin un cookie pseudonymisé signé, enregistre le clic via `register_ad_click`, puis répond en HTTP `302` vers le lien publicitaire. Le premier passage invisible pose seulement le cookie sécurisé ; le navigateur reprend immédiatement le même lien sans action supplémentaire du visiteur.
 
-Déployez-la une première fois :
+Avant le premier déploiement — et avant la mise à jour de sécurité `012` — créez un secret Edge distinct, long et aléatoire. Il ne doit jamais être mis dans le `.env` du bot ni dans Git :
 
 ```bash
 cd bot
 npx supabase login
 npx supabase link --project-ref VOTRE_PROJECT_REF
+npx supabase secrets set VISITOR_COOKIE_SECRET="COLLEZ_ICI_UN_SECRET_ALEATOIRE_D_AU_MOINS_32_CARACTERES"
 npx supabase functions deploy visit --no-verify-jwt
 ```
 
-Après l’installation de `004` à `011` et cette mise à jour du bot, redéployez aussi `visit` avec la même commande : elle affiche une page neutre lorsque le budget journalier est atteint, sans révéler de montant au membre.
+Pour passer à `012` sans casser les liens en cours : exécutez d’abord la migration `012`, mettez à jour/redémarrez le bot afin qu’il remplace immédiatement les messages actifs encore non tokenisés, puis déployez `visit` avec la commande ci-dessus. Chaque republication rend ensuite l’ancienne URL inutilisable.
+
+Après l’installation de `004` à `012` et cette mise à jour du bot, redéployez aussi `visit` avec la même commande : elle affiche une page neutre lorsque le budget journalier est atteint, sans révéler de montant au membre.
 
 Si le navigateur affiche « Erreur temporaire » après un bouton publicitaire, ouvrez **Supabase > Edge Functions > visit > Logs**, recherchez l’événement `register_ad_click_failed` et relevez son `diagnostic_id`. Les détails SQL restent uniquement dans les logs, jamais dans la page publique.
 
-Discord ne transmet pas l’identité du membre à un bouton-lien. Le suivi direct emploie donc un cookie pseudonymisé par navigateur, sans enregistrer d’adresse IP. Une déduplication exacte par compte Discord nécessiterait un parcours OAuth supplémentaire.
+Discord ne transmet pas l’identité du membre à un bouton-lien. Le suivi direct emploie donc un cookie pseudonymisé **signé** par navigateur, sans enregistrer d’adresse IP. Une déduplication exacte par compte Discord nécessiterait un parcours OAuth supplémentaire.
 
 ## Valeur des clics et protection
 
@@ -109,7 +113,7 @@ Dans le panneau `.click_guard`, le premier champ est au format `centimes/jours`,
 
 `.new_pub` reste réservée au propriétaire AdsCords. Le premier formulaire demande :
 
-1. le lien de destination ;
+1. le lien de destination HTTPS public et direct ;
 2. le texte principal ;
 3. l’ID Discord du propriétaire/annonceur ;
 4. la durée, de 1 à 365 jours, ou `illimité` ;
@@ -126,9 +130,9 @@ Après le formulaire, choisissez l’une des quatre options :
 - **€ • Avec embed** / **€ • Message simple** : campagne normale ;
 - **Bonus • Avec embed** / **Bonus • Message simple** : campagne à crédits bonus. Son budget est retiré immédiatement et atomiquement du portefeuille bonus de l’ID Discord renseigné ; la création est refusée si le solde est insuffisant.
 
-Envoyez ensuite une image/GIF directement dans le même salon sous 10 minutes, ou utilisez **Publier sans visuel**. Le bot télécharge puis réattache le fichier à chaque message publicitaire : le visuel ne disparaît pas quand le message source est supprimé.
+Envoyez ensuite une image/GIF directement dans le même salon sous 10 minutes, ou utilisez **Publier sans visuel**. Le bot accepte uniquement une image PNG, JPEG, GIF, WebP ou AVIF valide jusqu’à **8 Mo**, puis la réattache à chaque message publicitaire : le visuel ne disparaît pas quand le message source est supprimé.
 
-Le CTA reste un clic direct : **Rejoindre le serveur** pour une invitation Discord, sinon **Voir le site**.
+Le CTA reste un clic direct : **Rejoindre le serveur** pour une invitation Discord, sinon **Voir le site**. Les raccourcisseurs et les destinations HTTP non sécurisées sont refusés à la création d’une nouvelle campagne.
 
 ## Rémunération des serveurs
 
@@ -174,7 +178,7 @@ Réservée au propriétaire AdsCords, cette commande est la seule vue qui affich
 .mapub
 ```
 
-Disponible seulement sur le serveur défini par `MAPUB_GUILD_ID`. L’annonceur voit ses campagnes, le propriétaire AdsCords voit toutes les campagnes. Le tableau est une image PNG uniquement, avec statut, clics, budget restant, durée, jour courant et budget quotidien.
+Disponible seulement sur le serveur défini par `MAPUB_GUILD_ID`. L’annonceur voit ses campagnes, le propriétaire AdsCords voit toutes les campagnes. Le tableau est une image PNG uniquement, avec statut, clics uniques pseudonymisés, nombre actuel de serveurs qui diffusent la campagne, budget restant, durée, jour courant et budget quotidien. Discord ne donne pas de mesure fiable des vues : AdsCords n’affiche donc pas de faux CTR.
 
 ## Commandes
 

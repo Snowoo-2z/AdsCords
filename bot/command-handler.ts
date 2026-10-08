@@ -2,7 +2,7 @@ import { Client, EmbedBuilder, Message, PermissionFlagsBits } from 'discord.js';
 
 import { COMPONENT_PREFIX } from './constants.js';
 import { env } from './environment.js';
-import { CampaignService } from './campaign-service.js';
+import { CampaignService, MAX_CAMPAIGN_MEDIA_BYTES } from './campaign-service.js';
 import { ConfigurationService } from './configuration-service.js';
 import { clickGuardEmbed, clickGuardRow, clickLogsEmbed, helpEmbed, newAdEmbed } from './embeds.js';
 import { parsePrefixCommand } from './commands.js';
@@ -81,9 +81,13 @@ export class CommandHandler {
     const media = message.attachments.find((attachment) => {
       const contentType = attachment.contentType ?? '';
       const name = attachment.name ?? attachment.url;
-      return contentType.startsWith('image/') || /\.(apng|avif|gif|jpe?g|png|webp)$/iu.test(name);
+      return /^(image\/(avif|gif|jpeg|png|webp))$/iu.test(contentType) || /\.(apng|avif|gif|jpe?g|png|webp)$/iu.test(name);
     });
     if (!media) return false;
+    if (media.size > MAX_CAMPAIGN_MEDIA_BYTES) {
+      await this.replySafely(message, '❌ Le visuel dépasse la limite de 8 Mo. Envoie une image ou un GIF plus léger.');
+      return true;
+    }
 
     let result;
     try {
@@ -91,6 +95,10 @@ export class CommandHandler {
     } catch (error) {
       if (error instanceof Error && error.message.includes('BONUS_BALANCE_INSUFFICIENT')) {
         await this.replySafely(message, '❌ Le solde de crédits bonus du propriétaire de cette campagne est insuffisant. Aucun crédit n’a été retiré.');
+        return true;
+      }
+      if (error instanceof Error && (error.message.includes('visuel') || error.message.includes('image PNG'))) {
+        await this.replySafely(message, `❌ ${error.message}`);
         return true;
       }
       throw error;

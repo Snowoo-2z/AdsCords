@@ -106,12 +106,6 @@ export function adRow(trackingUrl: string, destinationUrl: string, disabled = fa
   );
 }
 
-export function destinationRow(url: string): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(isDiscordServerLink(url) ? 'Rejoindre le serveur' : 'Voir le site').setURL(url)
-  );
-}
-
 export function dashboardEmbed(campaigns: CampaignDashboardItem[]): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(0x3498db)

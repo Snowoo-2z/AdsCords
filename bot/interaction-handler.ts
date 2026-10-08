@@ -16,7 +16,6 @@ import { COMPONENT_PREFIX } from './constants.js';
 import { env } from './environment.js';
 import { CampaignService } from './campaign-service.js';
 import { ConfigurationService } from './configuration-service.js';
-import { destinationRow } from './embeds.js';
 import { euroToCents, formatBonusCreditsFromMilliCents, formatEuro } from './currency.js';
 
 const URL_INPUT_ID = 'pub:url';
@@ -163,10 +162,6 @@ export class InteractionHandler {
       return;
     }
 
-    // Compatibilité avec les boutons créés avant la redirection directe par lien.
-    if (customId.startsWith(COMPONENT_PREFIX.adVisit)) {
-      await this.handleAdClick(interaction);
-    }
   }
 
   private async handleCampaignOptions(interaction: ButtonInteraction): Promise<void> {
@@ -263,7 +258,7 @@ export class InteractionHandler {
     const budget = euroToCents(interaction.fields.getTextInputValue(BUDGET_INPUT_ID));
     const durationDays = this.campaignDuration(interaction.fields.getTextInputValue(DURATION_INPUT_ID));
     if (!this.isHttpUrl(rawUrl)) {
-      await interaction.reply({ content: '❌ Le lien doit commencer par `https://` ou `http://`.', ephemeral: true });
+      await interaction.reply({ content: '❌ Le lien doit être une adresse `https://` publique et directe (sans raccourcisseur).', ephemeral: true });
       return;
     }
     if (!description) {
@@ -349,22 +344,6 @@ export class InteractionHandler {
       `✅ Protection mise à jour : ${formatEuro(settings.firstDailyClickCents)} une fois tous les ${settings.firstValueCooldownDays} jours, puis ${formatEuro(settings.repeatClickMinCents)} à ${formatEuro(settings.repeatClickMaxCents)}.\n` +
         `Blocage : ${settings.suspiciousClicksPerDay} pubs/jour pendant ${settings.suspiciousDaysRequired} jour(s) sur 7 → ${settings.suspensionDays} jour(s).`
     );
-  }
-
-  private async handleAdClick(interaction: ButtonInteraction): Promise<void> {
-    if (!interaction.guildId) {
-      await interaction.reply({ content: '❌ Cette publicité doit être ouverte depuis un serveur.', ephemeral: true });
-      return;
-    }
-    const adId = interaction.customId.slice(COMPONENT_PREFIX.adVisit.length);
-    await interaction.deferReply({ ephemeral: true });
-    const result = await this.campaignService.registerClick(adId, interaction.user.id, interaction.guildId);
-
-    if ((result.status === 'charged' || result.status === 'already_clicked') && result.destinationUrl) {
-      await interaction.editReply({ content: '✅ Ouvre le lien ci-dessous.', components: [destinationRow(result.destinationUrl)] });
-      return;
-    }
-    await interaction.editReply({ content: 'ℹ️ Cette campagne n’est pas disponible pour le moment.', components: [] });
   }
 
   private async publishConfiguredGuild(guildId: string): Promise<{ sent: number; failed: number } | null> {
@@ -562,7 +541,18 @@ export class InteractionHandler {
   private isHttpUrl(value: string): boolean {
     try {
       const url = new URL(value);
-      return url.protocol === 'https:' || url.protocol === 'http:';
+      const hostname = url.hostname.toLowerCase();
+      const forbiddenHosts = new Set([
+        'localhost', '127.0.0.1', '0.0.0.0', '::1',
+        'bit.ly', 'tinyurl.com', 't.co', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly'
+      ]);
+      const privateIpv4 = /^(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)/u;
+      return url.protocol === 'https:' &&
+        url.username.length === 0 &&
+        url.password.length === 0 &&
+        hostname.length > 0 &&
+        !forbiddenHosts.has(hostname) &&
+        !privateIpv4.test(hostname);
     } catch {
       return false;
     }
