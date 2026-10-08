@@ -468,14 +468,21 @@ export class CampaignService {
     const nextRepublishAtMs = nextDelayMs === REPUBLISH_INTERVAL_MS
       ? nextRepublishAt(deliveredAtMs)
       : deliveredAtMs + nextDelayMs;
-    await this.adsRepository.saveDelivery({
-      adId: ad.id,
-      guildId,
-      channelId: channel.id,
-      messageId: message.id,
-      deliveryToken,
-      nextRepublishAt: new Date(nextRepublishAtMs).toISOString()
-    });
+    try {
+      await this.adsRepository.saveDelivery({
+        adId: ad.id,
+        guildId,
+        channelId: channel.id,
+        messageId: message.id,
+        deliveryToken,
+        nextRepublishAt: new Date(nextRepublishAtMs).toISOString()
+      });
+    } catch (error) {
+      // Une migration Supabase manquante ne doit jamais laisser une nouvelle copie non suivie
+      // dans le salon, ni déclencher une accumulation visible à chaque tentative du planificateur.
+      if (message.deletable) await message.delete().catch(() => undefined);
+      throw error;
+    }
   }
 
   private trackingUrl(adId: string, guildId: string, deliveryToken: string): string {
