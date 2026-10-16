@@ -131,6 +131,15 @@ export class AdsRepository {
     if (error) throw new Error(`Impossible de mémoriser la diffusion : ${error.message}`);
   }
 
+  /** Reporte une remontée sans modifier le message ni son lien de suivi. */
+  async postponeDelivery(deliveryId: string, nextRepublishAt: string): Promise<void> {
+    const { error } = await supabase
+      .from('ad_deliveries')
+      .update({ next_republish_at: nextRepublishAt })
+      .eq('id', deliveryId);
+    if (error) throw new Error(`Impossible de reporter la republication : ${error.message}`);
+  }
+
   async listAllDeliveries(): Promise<AdDelivery[]> {
     const { data, error } = await supabase.from('ad_deliveries').select();
     if (error) throw new Error(`Impossible de charger les diffusions : ${error.message}`);

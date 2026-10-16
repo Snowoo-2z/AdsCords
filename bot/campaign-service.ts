@@ -150,21 +150,22 @@ export class CampaignService {
       }
       const campaigns = [...campaignById.values()];
       const now = Date.now();
-      const tasks: Array<Promise<void>> = [];
+      const tasks: Array<Promise<boolean>> = [];
 
       for (const campaign of campaigns) {
         for (const setting of settings) {
           const previous = deliveryByCampaignAndGuild.get(`${campaign.id}:${setting.guildId}`);
-          // Sans diffusion, après un incident Discord ou pour remplacer une ancienne URL non tokenisée,
-          // la campagne est rétablie immédiatement.
-          if (previous && previous.trackingVersion >= 1 && now < new Date(previous.nextRepublishAt).getTime()) continue;
-          tasks.push(this.republishToGuild(campaign, setting.guildId, setting.adChannelId, previous, undefined, REPUBLISH_INTERVAL_MS));
+          // Sans diffusion, après un incident Discord, lors d'un changement de salon ou pour remplacer
+          // une ancienne URL non tokenisée, la campagne est rétablie immédiatement.
+          const mustRepublishNow = !previous || previous.trackingVersion < 1 || previous.channelId !== setting.adChannelId;
+          if (!mustRepublishNow && now < new Date(previous.nextRepublishAt).getTime()) continue;
+          tasks.push(this.refreshGuildCampaign(campaign, setting.guildId, setting.adChannelId, previous));
         }
       }
 
       const results = await Promise.allSettled(tasks);
       return {
-        reposted: results.filter((result) => result.status === 'fulfilled').length,
+        reposted: results.filter((result) => result.status === 'fulfilled' && result.value).length,
         failed: results.filter((result) => result.status === 'rejected').length
       };
     } finally {
@@ -372,6 +373,55 @@ export class CampaignService {
     const guild = await this.getGuild(guildId);
     if (guild && guild.ownerId !== savedOwnerId) {
       await this.settingsRepository.syncOwner(guild.id, guild.ownerId);
+    }
+  }
+
+  /**
+   * Une publicité déjà visible n'est remontée que si le salon a reçu un message plus récent.
+   * Sinon, le même message reste en bas du salon et le contrôle est reporté de cinq heures.
+   */
+  private async refreshGuildCampaign(
+    ad: AdCampaign,
+    guildId: string,
+    channelId: string,
+    previous?: AdDelivery
+  ): Promise<boolean> {
+    if (!previous || previous.trackingVersion < 1 || previous.channelId !== channelId) {
+      await this.republishToGuild(ad, guildId, channelId, previous, undefined, REPUBLISH_INTERVAL_MS);
+      return true;
+    }
+
+    if (!(await this.hasNewerMessage(previous))) {
+      await this.adsRepository.postponeDelivery(previous.id, new Date(nextRepublishAt(Date.now())).toISOString());
+      return false;
+    }
+
+    await this.republishToGuild(ad, guildId, channelId, previous, undefined, REPUBLISH_INTERVAL_MS);
+    return true;
+  }
+
+  private async hasNewerMessage(delivery: AdDelivery): Promise<boolean> {
+    const guild = await this.getGuild(delivery.guildId);
+    if (!guild) return false;
+    const channel = await guild.channels.fetch(delivery.channelId).catch(() => null);
+    if (!channel?.isTextBased() || channel.isDMBased()) return false;
+    const textChannel = channel as GuildTextBasedChannel;
+
+    try {
+      await textChannel.messages.fetch(delivery.messageId);
+    } catch (error) {
+      // Discord code 10008 : le message suivi a été supprimé. Il faut le rétablir.
+      if (typeof error === 'object' && error !== null && 'code' in error && Number(error.code) === 10_008) return true;
+      console.warn(`[AdsCords] Impossible de vérifier le message ${delivery.messageId}; remontée reportée.`, error);
+      return false;
+    }
+
+    try {
+      const newerMessages = await textChannel.messages.fetch({ after: delivery.messageId, limit: 1, cache: false });
+      return newerMessages.size > 0;
+    } catch (error) {
+      console.warn(`[AdsCords] Impossible de lire les messages récents de ${delivery.channelId}; remontée reportée.`, error);
+      return false;
     }
   }
 
